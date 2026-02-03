@@ -54,7 +54,7 @@ fn download_model_interface_headers(out_dir: &Path) -> Result<(), Box<dyn std::e
 }
 
 fn download_compiled_library(out_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let (os, _arch) = get_platform_info();
+    let (os, arch) = get_platform_info();
 
     // Create the library directory
     let lib_dir = out_dir.join("libs");
@@ -63,25 +63,32 @@ fn download_compiled_library(out_dir: &Path) -> Result<(), Box<dyn std::error::E
     // Use bundled library file based on target platform (hardcoded for testing)
     let manifest_dir = std::path::Path::new(file!()).parent().unwrap();
 
-    // Determine source and target filenames based on OS
-    let (bundled_lib, lib_filename) = match os.as_str() {
-        "windows" => (
+    // Determine source and target filenames based on OS and architecture
+    let (bundled_lib, lib_filename) = match (os.as_str(), arch.as_str()) {
+        ("windows", _) => (
             manifest_dir.join("catboostmodel.dll"),
             "catboostmodel.dll"
         ),
-        "darwin" => (
+        ("darwin", _) => (
             manifest_dir.join("libcatboostmodel.dylib"),
             "libcatboostmodel.dylib"
         ),
-        _ => (
+        ("linux", "x86_64") => (
+            manifest_dir.join("libcatboostmodel-x86_64.so"),
+            "libcatboostmodel.so"
+        ),
+        ("linux", "aarch64") => (
             manifest_dir.join("libcatboostmodel.so"),
             "libcatboostmodel.so"
         ),
+        _ => {
+            return Err(format!("Unsupported platform: {}-{}", os, arch).into());
+        }
     };
 
     let lib_path = lib_dir.join(lib_filename);
 
-    println!("cargo:warning=Using bundled library from: {}", bundled_lib.display());
+    println!("cargo:warning=Using bundled {} library from: {}", arch, bundled_lib.display());
 
     fs::copy(&bundled_lib, &lib_path)?;
 
