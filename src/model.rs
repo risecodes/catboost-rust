@@ -4,9 +4,14 @@ use crate::sys;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::Path;
+use std::sync::Arc;
 
 pub struct Model {
     handle: *mut sys::ModelCalcerHandle,
+    /// Buffer owner for zero-copy loading - keeps the buffer alive for model's lifetime
+    /// When using LoadFullModelZeroCopy, the model doesn't copy data and instead
+    /// points directly to this buffer. This field MUST stay alive as long as the model exists.
+    _buffer_owner: Option<Arc<Vec<u8>>>,
 }
 
 unsafe impl Send for Model {}
@@ -17,6 +22,7 @@ impl Model {
         let model_handle = unsafe { sys::ModelCalcerCreate() };
         Model {
             handle: model_handle,
+            _buffer_owner: None,
         }
     }
 
@@ -30,7 +36,14 @@ impl Model {
         Ok(model)
     }
 
-    /// Load a model from a buffer
+    /// Load a model from a buffer (copies data internally)
+    ///
+    /// WARNING: This method uses LoadFullModelFromBuffer which copies data through
+    /// CatBoost's internal memory pools. On ARM64 (aarch64), these memory pools have
+    /// a known memory leak issue where memory is not returned to the OS.
+    ///
+    /// For production use on ARM64, prefer `load_buffer_zero_copy` which avoids
+    /// the memory leak by not copying data.
     pub fn load_buffer<P: AsRef<Vec<u8>>>(buffer: P) -> CatBoostResult<Self> {
         let model = Model::new();
         CatBoostError::check_return_value(unsafe {
@@ -40,6 +53,45 @@ impl Model {
                 buffer.as_ref().len(),
             )
         })?;
+        Ok(model)
+    }
+
+    /// Load a model from a buffer using zero-copy approach
+    ///
+    /// This method uses LoadFullModelZeroCopy which does NOT copy the model data.
+    /// Instead, the model keeps a reference to the buffer and reads from it directly.
+    ///
+    /// **Advantages:**
+    /// - Lower memory usage (no duplicate copy of model data)
+    /// - Fixes ARM64 (aarch64) memory leak issue caused by internal memory pools
+    /// - Faster loading (no copying overhead)
+    ///
+    /// **Important:** The buffer is kept alive via Arc<Vec<u8>> for the model's lifetime.
+    /// When the Model is dropped, the buffer is automatically freed.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use catboost_rust::Model;
+    /// use std::fs;
+    ///
+    /// let buffer = fs::read("model.cbm").unwrap();
+    /// let model = Model::load_buffer_zero_copy(buffer).unwrap();
+    /// // Buffer stays alive, model can be used safely
+    /// ```
+    pub fn load_buffer_zero_copy(buffer: Vec<u8>) -> CatBoostResult<Self> {
+        let buffer_arc = Arc::new(buffer);
+        let mut model = Model::new();
+
+        CatBoostError::check_return_value(unsafe {
+            sys::LoadFullModelZeroCopy(
+                model.handle,
+                buffer_arc.as_ptr() as *const std::os::raw::c_void,
+                buffer_arc.len(),
+            )
+        })?;
+
+        // CRITICAL: Keep buffer alive by storing Arc in model
+        model._buffer_owner = Some(buffer_arc);
         Ok(model)
     }
 
